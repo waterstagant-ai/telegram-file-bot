@@ -112,10 +112,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"$set": {"expires_at": int(time.time()) + UNLOCK_SECONDS}},
             upsert=True
         )
-        await update.message.reply_text("✅ Access unlocked for 3 hours! You can now download all files.")
+        await update.message.reply_text("✅ Access unlocked for 3 hours! You can now view all files.")
         return
 
-    # ===== FILE DOWNLOAD =====
+    # ===== FILE ACCESS =====
     if args:
         file_code = args[0]
         expires_at = has_access(user_id)
@@ -140,27 +140,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       url=f"https://t.me/{context.bot.username}?start=ref_{user_id}")]
             ])
             await update.message.reply_text(
-                "🔒 Access locked.\n\nUnlock to access all files for 3 hours.",
+                "🔒 Access locked.\n\nUnlock to view all files for 3 hours.",
                 reply_markup=keyboard
             )
             return
 
-        # Send file as PROTECTED content (no forward, no download button)
+        # Fetch file and send as VIEW-ONLY (protected)
         file_data = files_col.find_one({"code": file_code})
         if not file_data:
             await update.message.reply_text("❌ File not found")
             return
 
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=file_data["file_id"],
-            caption=f"✅ Access granted\n⏳ Time left: {remaining_time(expires_at)}",
-            protect_content=True  # 🚫 disables forwarding & download
-        )
+        ftype = file_data.get("type", "document")
+        if ftype == "video":
+            await context.bot.send_video(
+                chat_id=update.effective_chat.id,
+                video=file_data["file_id"],
+                caption=f"✅ Access granted\n⏳ Time left: {remaining_time(expires_at)}",
+                protect_content=True,
+                supports_streaming=True
+            )
+        elif ftype == "photo":
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=file_data["file_id"],
+                caption=f"✅ Access granted\n⏳ Time left: {remaining_time(expires_at)}",
+                protect_content=True
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=file_data["file_id"],
+                caption=f"✅ Access granted\n⏳ Time left: {remaining_time(expires_at)}",
+                protect_content=True
+            )
         return
 
     await update.message.reply_text(
-        "📂 File Store Bot\n\nUse shared links to download files.\n\nCommands:\n/time – Check access time"
+        "📂 Secure File Bot\n\nUse shared links to view files.\n\nCommands:\n/time – Check access time"
     )
 
 # ===== ADMIN UPLOAD =====
@@ -168,14 +185,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    file = update.message.document
+    file = update.message.document or update.message.video or update.message.photo[-1] if update.message.photo else None
     if not file:
         return
+
+    # Determine file type
+    if update.message.video:
+        ftype = "video"
+        file_id = update.message.video.file_id
+    elif update.message.photo:
+        ftype = "photo"
+        file_id = update.message.photo[-1].file_id
+    else:
+        ftype = "document"
+        file_id = update.message.document.file_id
 
     # Forward to private channel for permanent storage
     await context.bot.send_document(
         chat_id=CHANNEL_ID,
-        document=file.file_id,
+        document=file_id,
         caption="📦 Stored file",
         protect_content=True
     )
@@ -183,13 +211,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = uuid.uuid4().hex[:8]
     files_col.insert_one({
         "code": code,
-        "file_id": file.file_id
+        "file_id": file_id,
+        "type": ftype
     })
 
     link = f"https://t.me/{context.bot.username}?start={code}"
     await update.message.reply_text(
         "✅ File uploaded\n\nShare link:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download File", url=link)]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 View File", url=link)]])
     )
 
 # ===== MAIN =====
@@ -198,7 +227,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("time", time_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.VIDEO | filters.PHOTO, handle_file))
     app.run_polling()
 
 if __name__ == "__main__":
