@@ -1,54 +1,54 @@
+# bot.py
 import os
+from dotenv import load_dotenv
 from pymongo import MongoClient
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ---------- CONFIGURATION ----------
-# Set these as environment variables in Railway or your local machine
-BOT_TOKEN = os.environ.get("BOT_TOKEN")        # Your new bot token
-MONGO_URL = os.environ.get("MONGO_URL")        # Your new MongoDB URL
-CHANNEL_ID = os.environ.get("CHANNEL_ID")      # Your new Telegram channel ID (for posting data)
-# -----------------------------------
+# Load environment variables from .env
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URL = os.getenv("MONGO_URL")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # Example: -1003510118476
 
 # Connect to MongoDB
 client = MongoClient(MONGO_URL)
-db = client['my_bot_database']       # Database name
-collection = db['users']             # Collection name
+db = client["telegram_bot_db"]  # Database name
+collection = db["users"]        # Collection name
 
-# ---------- BOT HANDLERS ----------
+# Create Telegram bot application
+app = Application.builder().token(BOT_TOKEN).build()
+
+# /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username
+    user = update.effective_user
 
-    # Add user to MongoDB if not exists
-    if not collection.find_one({"user_id": user_id}):
-        collection.insert_one({"user_id": user_id, "username": username})
+    # Save user info in MongoDB
+    collection.update_one(
+        {"user_id": user.id},
+        {"$set": {"username": user.username, "first_name": user.first_name}},
+        upsert=True
+    )
 
-    # Send message with inline button
-    keyboard = [[InlineKeyboardButton("Visit Channel", url="https://t.me/YourChannelUsername")]]
+    # Proper channel link for numeric ID
+    channel_link = f"https://t.me/c/{str(CHANNEL_ID)[4:]}"  # remove -100 prefix
+
+    # Inline keyboard example
+    keyboard = [
+        [InlineKeyboardButton("Visit Channel", url=channel_link)],
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"Hello {username}! You are added to the database.",
+        f"Hello {user.first_name}! Your data is saved in MongoDB.",
         reply_markup=reply_markup
     )
 
-async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show all users in the database"""
-    users = list(collection.find({}, {"_id": 0, "username": 1}))
-    if users:
-        message = "Registered users:\n" + "\n".join([u.get("username", "Unknown") for u in users])
-    else:
-        message = "No users found."
-    await update.message.reply_text(message)
+# Add /start handler
+app.add_handler(CommandHandler("start", start))
 
-# ---------- MAIN ----------
+# Run bot
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Commands
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("users", users))
-
     print("Bot is running...")
     app.run_polling()
