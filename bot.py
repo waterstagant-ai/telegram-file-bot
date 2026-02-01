@@ -2,6 +2,7 @@ import os
 import uuid
 import time
 import logging
+import sys
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -16,7 +17,17 @@ from pymongo import MongoClient
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ===== ENVIRONMENT VARIABLES WITH SAFETY CHECK =====
+# ===== PYTHON-TELEGRAM-BOT VERSION CHECK =====
+try:
+    import telegram
+    if not telegram.__version__.startswith("20"):
+        logger.error(f"python-telegram-bot version must be 20.x, found {telegram.__version__}")
+        sys.exit(1)
+except Exception as e:
+    logger.error(f"Telegram library import failed: {e}")
+    sys.exit(1)
+
+# ===== ENVIRONMENT VARIABLES SAFETY =====
 try:
     BOT_TOKEN = os.environ.get("BOT_TOKEN")
     if not BOT_TOKEN:
@@ -30,14 +41,14 @@ try:
 
 except Exception as e:
     logger.error(f"Environment variable error: {e}")
-    exit(1)
+    sys.exit(1)
 
 SHORTENER_LINK = "https://your-shortener-link-here"
 UNLOCK_SECONDS = 3 * 60 * 60  # 3 hours
 REFERRAL_REQUIRED = 3
 COOLDOWN_SECONDS = 5
 
-# ===== DATABASE CONNECTION =====
+# ===== DATABASE =====
 try:
     mongo = MongoClient(MONGO_URI)
     db = mongo["telegram_files"]
@@ -45,7 +56,7 @@ try:
     users_col = db["users"]
 except Exception as e:
     logger.error(f"MongoDB connection error: {e}")
-    exit(1)
+    sys.exit(1)
 
 # ===== HELPER FUNCTIONS =====
 def remaining_time(expires_at):
@@ -76,7 +87,7 @@ def check_cooldown(user_id):
     )
     return True
 
-# ===== /time COMMAND =====
+# ===== COMMANDS =====
 async def time_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     expires_at = has_access(user_id)
@@ -85,7 +96,6 @@ async def time_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(f"⏳ Access time left: {remaining_time(expires_at)}")
 
-# ===== /stats COMMAND (ADMIN ONLY) =====
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -109,7 +119,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
 
-    # ===== REFERRAL LOGIC =====
+    # Referral logic
     if args and args[0].startswith("ref_"):
         referrer = int(args[0].split("_")[1])
         if referrer != user_id:
@@ -124,17 +134,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 upsert=True
             )
 
-    # ===== SHORTENER UNLOCK =====
+    # Shortener unlock
     if args and args[0] == "unlock":
         users_col.update_one(
             {"user_id": user_id},
             {"$set": {"expires_at": int(time.time()) + UNLOCK_SECONDS}},
             upsert=True
         )
-        await update.message.reply_text("✅ Access unlocked for 3 hours! You can now view all files.")
+        await update.message.reply_text("✅ Access unlocked for 3 hours!")
         return
 
-    # ===== FILE ACCESS =====
+    # File access
     if args:
         file_code = args[0]
         expires_at = has_access(user_id)
@@ -142,15 +152,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not expires_at:
             user = users_col.find_one({"user_id": user_id}) or {"referrals": 0}
             referrals = user.get("referrals", 0)
-
-            # Referral unlock
             if referrals >= REFERRAL_REQUIRED:
                 users_col.update_one(
                     {"user_id": user_id},
                     {"$set": {"expires_at": int(time.time()) + UNLOCK_SECONDS}},
                     upsert=True
                 )
-                await update.message.reply_text("🎉 Unlocked via referrals! Access valid for 3 hours.")
+                await update.message.reply_text("🎉 Unlocked via referrals!")
                 return
 
             keyboard = InlineKeyboardMarkup([
@@ -159,12 +167,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       url=f"https://t.me/{context.bot.username}?start=ref_{user_id}")]
             ])
             await update.message.reply_text(
-                "🔒 Access locked.\n\nUnlock to view all files for 3 hours.",
+                "🔒 Access locked. Unlock to view files.",
                 reply_markup=keyboard
             )
             return
 
-        # Fetch file and send as VIEW-ONLY (protected)
+        # Send protected view-only content
         file_data = files_col.find_one({"code": file_code})
         if not file_data:
             await update.message.reply_text("❌ File not found")
@@ -196,7 +204,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "📂 Secure File Bot\n\nUse shared links to view files.\n\nCommands:\n/time – Check access time"
+        "📂 Secure File Bot\nCommands:\n/time – Check access time"
     )
 
 # ===== ADMIN UPLOAD =====
@@ -208,7 +216,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not file:
         return
 
-    # Determine file type
+    # Determine type
     if update.message.video:
         ftype = "video"
         file_id = update.message.video.file_id
@@ -219,7 +227,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ftype = "document"
         file_id = update.message.document.file_id
 
-    # Forward to private channel for permanent storage
+    # Store permanently in private channel
     await context.bot.send_document(
         chat_id=CHANNEL_ID,
         document=file_id,
@@ -236,7 +244,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     link = f"https://t.me/{context.bot.username}?start={code}"
     await update.message.reply_text(
-        "✅ File uploaded\n\nShare link:",
+        "✅ File uploaded\nShare link:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 View File", url=link)]])
     )
 
